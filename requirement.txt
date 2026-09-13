@@ -1,8 +1,8 @@
 streamlit
+networkx
 openai
 spacy
 ginza
 ja-ginza
 pandas
-networkx
 matplotlib
