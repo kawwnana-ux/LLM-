@@ -1,8 +1,11 @@
 streamlit
-networkx
-openai
 spacy
 ginza
 ja-ginza
+sudachipy
+sudachidict_core
+networkx
 pandas
+numpy
 matplotlib
+requests
