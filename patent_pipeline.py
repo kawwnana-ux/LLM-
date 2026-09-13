@@ -1,86 +1,86 @@
-import os
-import re
 import json
-from typing import Dict, Any, List
+import re
+from typing import Dict, Any
 
+import requests
 import spacy
-from openai import OpenAI
 
 
 # =========================================================
-# 1. GiNZA
+# 設定
 # =========================================================
 
-@staticmethod
-def _load_ginza():
-    try:
-        return spacy.load("ja_ginza")
-    except Exception:
-        try:
-            return spacy.load("ja_ginza_electra")
-        except Exception as e:
-            raise RuntimeError(
-                "GiNZAモデルを読み込めませんでした。"
-                "requirements.txt を確認してください。"
-            ) from e
+OLLAMA_URL = "http://localhost:11434/api/chat"
 
+# 最初に使うモデル
+OLLAMA_MODEL = "gpt-oss:20b"
+
+
+# =========================================================
+# GiNZA
+# =========================================================
 
 _NLP = None
 
 
 def get_nlp():
+
     global _NLP
 
     if _NLP is None:
-        _NLP = _load_ginza()
+
+        try:
+            _NLP = spacy.load("ja_ginza")
+
+        except Exception:
+
+            try:
+                _NLP = spacy.load("ja_ginza_electra")
+
+            except Exception as e:
+
+                raise RuntimeError(
+                    "GiNZAモデルを読み込めませんでした。"
+                ) from e
 
     return _NLP
 
 
 # =========================================================
-# 2. 特許請求項の前処理
+# 前処理
 # =========================================================
 
 def preprocess_claim(text: str) -> str:
-    """
-    特許請求項をSAO解析しやすい形に軽く前処理する。
-
-    重要:
-    ・意味を変えるような大胆な書き換えはしない
-    ・前記などの照応表現はLLM側で処理
-    ・少なくとも等も削除しない
-    """
 
     if not text:
         return ""
 
     text = text.strip()
 
-    # 全角空白
     text = text.replace("\u3000", " ")
 
-    # 改行・連続空白
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
 
-    # 「請求項１」などの見出しを軽く除去
     text = re.sub(
         r"^\s*【?請求項\s*[0-9０-９]+\s*】?\s*",
         "",
         text
     )
 
-    # 全角括弧などを統一
-    text = text.replace("（", "(")
-    text = text.replace("）", ")")
-
     return text.strip()
 
 
 # =========================================================
-# 3. GiNZA係り受け解析
+# GiNZA解析
 # =========================================================
 
-def ginza_parse(text: str) -> Dict[str, Any]:
+def ginza_parse(
+    text: str
+) -> Dict[str, Any]:
 
     nlp = get_nlp()
 
@@ -89,6 +89,7 @@ def ginza_parse(text: str) -> Dict[str, Any]:
     tokens = []
 
     for token in doc:
+
         tokens.append({
             "id": token.i,
             "text": token.text,
@@ -97,12 +98,13 @@ def ginza_parse(text: str) -> Dict[str, Any]:
             "tag": token.tag_,
             "dep": token.dep_,
             "head": token.head.i,
-            "head_text": token.head.text,
+            "head_text": token.head.text
         })
 
     sentences = []
 
     for sent in doc.sents:
+
         sentences.append({
             "text": sent.text,
             "start": sent.start,
@@ -117,44 +119,49 @@ def ginza_parse(text: str) -> Dict[str, Any]:
 
 
 # =========================================================
-# 4. LLM用JSON Schema
+# SAO JSON Schema
 # =========================================================
 
 SAO_SCHEMA = {
+
     "type": "object",
-    "additionalProperties": False,
+
     "properties": {
+
         "claim_subject": {
             "type": "string"
         },
+
         "nodes": {
+
             "type": "array",
+
             "items": {
+
                 "type": "object",
-                "additionalProperties": False,
+
                 "properties": {
+
                     "id": {
                         "type": "string"
                     },
+
                     "text": {
                         "type": "string"
                     },
+
                     "node_type": {
-                        "type": "string",
-                        "enum": [
-                            "claim",
-                            "component",
-                            "function",
-                            "property",
-                            "terminal",
-                            "location",
-                            "other"
-                        ]
+                        "type": "string"
                     },
+
                     "parent_id": {
-                        "type": ["string", "null"]
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
+
                 "required": [
                     "id",
                     "text",
@@ -163,37 +170,38 @@ SAO_SCHEMA = {
                 ]
             }
         },
+
         "relations": {
+
             "type": "array",
+
             "items": {
+
                 "type": "object",
-                "additionalProperties": False,
+
                 "properties": {
+
                     "subject_id": {
                         "type": "string"
                     },
+
                     "action": {
                         "type": "string"
                     },
+
                     "object_id": {
                         "type": "string"
                     },
+
                     "relation_type": {
-                        "type": "string",
-                        "enum": [
-                            "containment",
-                            "function",
-                            "location",
-                            "position",
-                            "property",
-                            "connection",
-                            "other"
-                        ]
+                        "type": "string"
                     },
+
                     "level": {
                         "type": "integer"
                     }
                 },
+
                 "required": [
                     "subject_id",
                     "action",
@@ -204,6 +212,7 @@ SAO_SCHEMA = {
             }
         }
     },
+
     "required": [
         "claim_subject",
         "nodes",
@@ -213,56 +222,57 @@ SAO_SCHEMA = {
 
 
 # =========================================================
-# 5. LLMプロンプト
+# LLMプロンプト
 # =========================================================
 
 SYSTEM_PROMPT = r"""
-あなたは日本語特許請求項のSAO構造解析専門システムです。
+あなたは日本語特許請求項のSAO構造解析システムです。
 
-目的は、特許請求項から
+入力された特許請求項から、
 
-Subject - Action - Object
+Subject
+Action
+Object
 
-の関係を抽出し、さらにそれらを階層構造として表現することです。
+のSAO関係を抽出してください。
 
-【最重要ルール】
+さらに、SAOを階層構造として表現してください。
 
-1. 特許請求項に書かれていない関係を推測して追加しない。
+==================================================
+重要ルール
+==================================================
 
-2. 「前記」は新しいノードにしない。
-   以前に出現した同一対象を参照する。
+【1. 勝手に関係を作らない】
 
-3. 「少なくとも」「少なくとも１つ」などの数量表現は、
-   原則として独立ノードにしない。
+本文に存在しない関係を推測して追加してはいけません。
 
-4. 技術的に意味のある名詞句はできるだけそのまま保持する。
+==================================================
 
-5. 「放熱装置の主面」は、原則として
-   「放熱装置の主面」という名詞句として扱う。
+【2. 前記】
 
-6. 並列された対象は別々のノードとして作る。
+「前記」は新しいノードにしません。
 
-例:
-「正側電源入力端子、負側電源入力端子および出力端子」
+例えば、
 
-なら、
+パワー半導体モジュール
+前記パワー半導体モジュール
 
-正側電源入力端子
-負側電源入力端子
-出力端子
+は同じノードとして扱います。
 
-を別々のノードにする。
+==================================================
 
-7. 「Aの一部はBとCとの間に位置する」
-の場合、
+【3. 数量表現】
 
-Subject = Aの一部
-Action = 位置する
-Object = BとCとの間
+「少なくとも」
+「少なくとも１つ」
 
-とする。
+などは通常ノードにしません。
 
-8. 階層構造を重要視する。
+==================================================
+
+【4. 備える】
+
+請求項の最上位構造として扱います。
 
 例えば、
 
@@ -274,97 +284,75 @@ Object = BとCとの間
 
 インテリジェントパワーモジュール
  └─ 備える
-    ├─ 放熱装置
-    ├─ 取り付けフレーム
-    └─ パワー半導体モジュール
+     ├─ 放熱装置
+     ├─ 取り付けフレーム
+     └─ パワー半導体モジュール
 
-とする。
+です。
 
-9. 「有する」「含む」は単純に「備える」に置換しない。
+==================================================
+
+【5. 有する】
+
+「有する」を「備える」に置換してはいけません。
 
 例えば、
 
-「取り付けフレームは開口部を有する」
+取り付けフレームは開口部を有する
 
 なら、
 
 取り付けフレーム
  └─ 有する
-    └─ 開口部
+     └─ 開口部
 
-とする。
+です。
 
-10. 「パワー半導体モジュールは端子を含む」
+==================================================
+
+【6. 含む】
+
+「含む」も独立した関係として扱います。
+
+例えば、
+
+パワー半導体モジュールは
+正側電源入力端子、負側電源入力端子
+および出力端子を含む
+
 なら、
 
 パワー半導体モジュール
  └─ 含む
-    ├─ 正側電源入力端子
-    ├─ 負側電源入力端子
-    └─ 出力端子
+     ├─ 正側電源入力端子
+     ├─ 負側電源入力端子
+     └─ 出力端子
 
-とする。
+です。
 
-11. 「スイッチング機能を有するパワー半導体モジュール」
+==================================================
+
+【7. 機能】
+
+「スイッチング機能を有する
+パワー半導体モジュール」
+
 なら、
 
 パワー半導体モジュール
  └─ 有する
-    └─ スイッチング機能
+     └─ スイッチング機能
 
-とする。
+です。
 
-12. 「備える」は請求項全体の主要構成を示す上位関係として扱う。
+==================================================
 
-13. 「有する」「含む」は、対応する構成要素の下位関係として扱う。
+【8. 位置関係】
 
-14. parent_idには、階層上の親となるノードIDを入れる。
-
-15. relationsには実際のSAO関係をすべて記録する。
-
-16. level:
-   0 = 請求項の最上位
-   1 = 主要構成
-   2 = 構成要素の内部構成
-   3 = さらに下位
-   とする。
-
-17. 受動態でも意味を保持する。
-
-例えば
-「Aに配置されたB」
-なら、
-Bを主体として「配置される」関係を作る。
-
-18. 「位置決めされている」は
-   「位置決めされる」
-   として正規化してよい。
-
-19. 「含み」は「含む」、
-   「有し」は「有する」
-   のように動詞の基本形に正規化する。
-
-20. ただし「有する」と「備える」と「含む」を
-   同一関係として統合してはいけない。
-
-【特に重要】
-
-以下のような誤りを絶対に避ける。
-
-誤:
-パワー半導体モジュール → 有する → 放熱装置
-
-本文にその関係が存在しない場合、作ってはいけない。
-
-また、
-
-放熱装置 → 間に位置する → インテリジェントパワーモジュール
-
-のように、係り受けを誤って逆転させてはいけない。
+例えば、
 
 「取り付けフレームの一部は、
-正側電源入力端子、負側電源入力端子および出力端子と、
-放熱装置との間に位置する」
+端子と放熱装置との間に位置する」
 
 なら、
 
@@ -375,45 +363,150 @@ Action:
 位置する
 
 Object:
-正側電源入力端子、負側電源入力端子および出力端子と、放熱装置との間
+端子と放熱装置との間
 
-である。
+です。
 
-【出力】
+絶対に、
 
-JSON Schemaに完全に従って出力すること。
+放熱装置 → 位置する → インテリジェントパワーモジュール
+
+などと逆転させないでください。
+
+==================================================
+
+【9. Aの一部】
+
+「取り付けフレームの一部」
+
+は必要に応じて独立したノードとして扱います。
+
+==================================================
+
+【10. 並列】
+
+「A、BおよびC」
+
+のような並列構造は、
+
+A
+B
+C
+
+を別々のノードとして扱います。
+
+==================================================
+
+【11. 動詞】
+
+「含み」→「含む」
+「有し」→「有する」
+「位置決めされている」→「位置決めされる」
+
+のように基本形にします。
+
+==================================================
+
+【12. 階層】
+
+level 0:
+請求項
+
+level 1:
+主要構成
+
+level 2:
+構成要素内部
+
+level 3:
+さらに下位
+
+としてください。
+
+==================================================
+
+【13. parent_id】
+
+各ノードの直接の親を指定してください。
+
+例えば、
+
+インテリジェントパワーモジュール
+    ↓
+パワー半導体モジュール
+    ↓
+出力端子
+
+なら、
+
+パワー半導体モジュール.parent_id
+=
+インテリジェントパワーモジュールのID
+
+出力端子.parent_id
+=
+パワー半導体モジュールのID
+
+です。
+
+==================================================
+
+【14. 技術用語】
+
+「放熱装置」
+「パワー半導体モジュール」
+「正側電源入力端子」
+
+などの技術的名詞句は、できるだけ原文を保持してください。
+
+==================================================
+
+【15. 最重要】
+
+SAOの意味関係を正確にすることを最優先してください。
+
 """
 
 
 # =========================================================
-# 6. OpenAIクライアント
+# Ollama接続確認
 # =========================================================
 
-def get_openai_client():
+def check_ollama():
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    try:
 
-    if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY が設定されていません。"
+        response = requests.get(
+            "http://localhost:11434/api/tags",
+            timeout=5
         )
 
-    return OpenAI(api_key=api_key)
+        if response.status_code == 200:
+            return True
+
+    except Exception:
+        pass
+
+    return False
 
 
 # =========================================================
-# 7. LLM SAO抽出
+# LLM SAO抽出
 # =========================================================
 
 def extract_sao_with_llm(
     claim_text: str,
-    ginza_result: Dict[str, Any],
-    model: str = "gpt-5.6-luna"
-) -> Dict[str, Any]:
+    ginza_result: Dict[str, Any]
+):
 
-    client = get_openai_client()
+    if not check_ollama():
 
-    # GiNZAの解析結果をLLMへの補助情報として渡す
+        raise RuntimeError(
+            "Ollamaに接続できません。\n\n"
+            "PowerShellで「ollama list」を実行して、"
+            "Ollamaがインストールされているか確認してください。"
+        )
+
     ginza_text = json.dumps(
         ginza_result,
         ensure_ascii=False,
@@ -421,83 +514,136 @@ def extract_sao_with_llm(
     )
 
     user_prompt = f"""
-以下の特許請求項をSAO解析してください。
+以下の日本語特許請求項を解析してください。
 
 【特許請求項】
+
 {claim_text}
 
-【GiNZA係り受け解析】
+
+【GiNZA解析結果】
+
 {ginza_text}
 
-GiNZA解析は参考情報です。
-最終的なSAO構造は特許文の意味と構文を優先してください。
 
-特に、
-・前記の照応解決
-・備えるの上位構造
-・有する/含むの下位構造
-・並列構造
-・受動態
-・位置関係
-・「Aの一部」
-を正確に処理してください。
+上記を参考にして、指定されたJSON Schemaに従って
+階層SAOを抽出してください。
+
+GiNZAの解析が意味的に誤っている場合は、
+特許請求項本文を優先してください。
 """
 
-    response = client.responses.create(
-        model=model,
-        input=[
+    payload = {
+
+        "model": OLLAMA_MODEL,
+
+        "messages": [
+
             {
                 "role": "system",
                 "content": SYSTEM_PROMPT
             },
+
             {
                 "role": "user",
                 "content": user_prompt
             }
         ],
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "patent_sao",
-                "strict": True,
-                "schema": SAO_SCHEMA
-            }
+
+        "stream": False,
+
+        "format": SAO_SCHEMA,
+
+        "options": {
+            "temperature": 0
         }
-    )
+    }
 
-    result_text = response.output_text
+    try:
 
-    return json.loads(result_text)
+        response = requests.post(
+            OLLAMA_URL,
+            json=payload,
+            timeout=600
+        )
+
+    except requests.exceptions.ConnectionError:
+
+        raise RuntimeError(
+            "Ollamaに接続できません。\n\n"
+            "Ollamaが起動していることを確認してください。"
+        )
+
+    if response.status_code != 200:
+
+        raise RuntimeError(
+            "Ollama APIエラー:\n"
+            + response.text
+        )
+
+    data = response.json()
+
+    content = data[
+        "message"
+    ][
+        "content"
+    ]
+
+    try:
+
+        return json.loads(content)
+
+    except json.JSONDecodeError:
+
+        raise RuntimeError(
+            "LLMが正しいJSONを返しませんでした。\n\n"
+            + content
+        )
 
 
 # =========================================================
-# 8. LLM結果の簡易検証
+# SAO検証
 # =========================================================
 
-def validate_sao(result: Dict[str, Any]) -> Dict[str, Any]:
+def validate_sao(
+    result: Dict[str, Any]
+):
 
     node_ids = {
         node["id"]
-        for node in result.get("nodes", [])
+        for node in result.get(
+            "nodes",
+            []
+        )
     }
 
     valid_relations = []
 
-    for relation in result.get("relations", []):
+    for relation in result.get(
+        "relations",
+        []
+    ):
 
-        s = relation["subject_id"]
-        o = relation["object_id"]
+        subject = relation[
+            "subject_id"
+        ]
 
-        if s not in node_ids:
+        object_ = relation[
+            "object_id"
+        ]
+
+        if subject not in node_ids:
             continue
 
-        if o not in node_ids:
+        if object_ not in node_ids:
             continue
 
-        if s == o:
+        if subject == object_:
             continue
 
-        valid_relations.append(relation)
+        valid_relations.append(
+            relation
+        )
 
     result["relations"] = valid_relations
 
@@ -505,15 +651,22 @@ def validate_sao(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =========================================================
-# 9. グラフ用データ作成
+# グラフデータ
 # =========================================================
 
 def build_graph_data(
-    sao_result: Dict[str, Any]
-) -> Dict[str, Any]:
+    sao_result
+):
 
-    nodes = sao_result.get("nodes", [])
-    relations = sao_result.get("relations", [])
+    nodes = sao_result.get(
+        "nodes",
+        []
+    )
+
+    relations = sao_result.get(
+        "relations",
+        []
+    )
 
     node_map = {
         node["id"]: node
@@ -532,55 +685,85 @@ def build_graph_data(
             relation["object_id"]
         )
 
-        if not subject or not object_:
+        if subject is None:
+            continue
+
+        if object_ is None:
             continue
 
         edges.append({
+
             "source": subject["text"],
-            "action": relation["action"],
-            "target": object_["text"],
-            "level": relation["level"],
-            "relation_type": relation["relation_type"]
+
+            "action": relation[
+                "action"
+            ],
+
+            "target": object_[
+                "text"
+            ],
+
+            "level": relation[
+                "level"
+            ],
+
+            "relation_type":
+                relation[
+                    "relation_type"
+                ]
         })
 
     return {
+
         "nodes": nodes,
+
         "edges": edges
     }
 
 
 # =========================================================
-# 10. 全体パイプライン
+# 全体解析
 # =========================================================
 
 def analyze_claim(
-    claim_text: str,
-    model: str = "gpt-5.6-luna"
-) -> Dict[str, Any]:
+    claim_text: str
+):
 
-    # 前処理
-    processed = preprocess_claim(claim_text)
-
-    # GiNZA
-    ginza_result = ginza_parse(processed)
-
-    # LLM
-    sao_result = extract_sao_with_llm(
-        processed,
-        ginza_result,
-        model=model
+    processed = preprocess_claim(
+        claim_text
     )
 
-    # 検証
-    sao_result = validate_sao(sao_result)
+    ginza_result = ginza_parse(
+        processed
+    )
 
-    # グラフ
-    graph_data = build_graph_data(sao_result)
+    sao_result = extract_sao_with_llm(
+        processed,
+        ginza_result
+    )
+
+    sao_result = validate_sao(
+        sao_result
+    )
+
+    graph_data = build_graph_data(
+        sao_result
+    )
 
     return {
-        "original_text": claim_text,
-        "processed_text": processed,
-        "ginza": ginza_result,
-        "sao": sao_result,
-        "graph": graph_data
+
+        "original_text":
+            claim_text,
+
+        "processed_text":
+            processed,
+
+        "ginza":
+            ginza_result,
+
+        "sao":
+            sao_result,
+
+        "graph":
+            graph_data
     }
